@@ -31,13 +31,22 @@ type Limiter struct {
 	cancel func()
 }
 
-func (bg *Limiter) Add(fn func(ctx context.Context) error) <-chan error {
-	errChan := make(chan error, 1)
-
+// Do runs fn in the background if there are enough workers, otherwise it blocks until one is available.
+// if errChang is not nil, any errors or timeouts will be sent to it.
+func (bg *Limiter) Do(fn func(ctx context.Context) error, errChan chan<- error) bool {
 	if !bg.add() {
-		errChan <- context.Canceled
-		close(errChan)
-		return errChan
+		if errChan != nil {
+			errChan <- context.Canceled
+		}
+		return false
+	}
+
+	if errChan == nil {
+		go func() {
+			defer bg.done()
+			fn(bg.ctx)
+		}()
+		return true
 	}
 
 	ch := make(chan error, 1)
@@ -50,20 +59,20 @@ func (bg *Limiter) Add(fn func(ctx context.Context) error) <-chan error {
 		case <-bg.ctx.Done():
 			errChan <- xerrors.Errorf("global ctx: %w", bg.ctx.Err())
 		}
-		close(errChan)
 		bg.done()
 	}()
 
-	return errChan
+	return true
 }
 
-func (bg *Limiter) AddWithTimeout(fn func(ctx context.Context) error, timeout time.Duration) <-chan error {
-	errChan := make(chan error, 1)
-
+// DoWithTimeout runs fn in the background if there are enough workers, otherwise it blocks until one is available.
+// if errChang is not nil, any errors or timeouts will be sent to it.
+func (bg *Limiter) DoWithTimeout(fn func(ctx context.Context) error, timeout time.Duration, errChan chan<- error) bool {
 	if !bg.add() {
-		errChan <- context.Canceled
-		close(errChan)
-		return errChan
+		if errChan != nil {
+			errChan <- context.Canceled
+		}
+		return false
 	}
 
 	tctx, cancel := context.WithTimeout(bg.ctx, timeout)
@@ -74,11 +83,17 @@ func (bg *Limiter) AddWithTimeout(fn func(ctx context.Context) error, timeout ti
 	go func() {
 		select {
 		case err := <-ch:
-			errChan <- err
+			if errChan != nil {
+				errChan <- err
+			}
 		case <-bg.ctx.Done():
-			errChan <- xerrors.Errorf("global ctx: %w", bg.ctx.Err())
+			if errChan != nil {
+				errChan <- xerrors.Errorf("global ctx: %w", bg.ctx.Err())
+			}
 		case <-tctx.Done():
-			errChan <- xerrors.Errorf("timeout ctx: %w", tctx.Err())
+			if errChan != nil {
+				errChan <- xerrors.Errorf("timeout ctx: %w", tctx.Err())
+			}
 
 		}
 		close(errChan)
@@ -86,7 +101,7 @@ func (bg *Limiter) AddWithTimeout(fn func(ctx context.Context) error, timeout ti
 		bg.done()
 	}()
 
-	return errChan
+	return true
 }
 
 func (bg *Limiter) Context() context.Context { return bg.ctx }
@@ -121,7 +136,12 @@ func (bg *Limiter) WaitWithContext(ctx context.Context) error {
 
 func (bg *Limiter) add() bool {
 	if bg.ch != nil {
-		bg.ch <- struct{}{}
+		var e struct{}
+		select {
+		case bg.ch <- e:
+		case <-bg.ctx.Done():
+			return false
+		}
 	}
 
 	if bg.IsCanceled() {

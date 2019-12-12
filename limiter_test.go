@@ -23,12 +23,12 @@ func TestLimit(t *testing.T) {
 	}
 
 	go func() {
-		bg.Add(fn)
-		bg.Add(fn)
+		bg.Do(fn, nil)
+		bg.Do(fn, nil)
 
-		// fn will no longer run since when .Add executes, bg is canceled
-		bg.Add(fn)
-		bg.Add(fn)
+		// fn will no longer run since when .Do executes, bg is cancele, nild
+		bg.Do(fn, nil)
+		bg.Do(fn, nil)
 		atomic.StoreInt64(&n, 99)
 	}()
 
@@ -51,7 +51,8 @@ func TestLimit(t *testing.T) {
 		return nil
 	}
 
-	errCh := bg.AddWithTimeout(fn, time.Millisecond)
+	errCh := make(chan error, 2)
+	bg.DoWithTimeout(fn, time.Millisecond, errCh)
 	select {
 	case err := <-errCh:
 		if !xerrors.Is(err, context.DeadlineExceeded) {
